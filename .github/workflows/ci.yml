@@ -17,8 +17,16 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      - name: Show files (debug)
+        run: |
+          pwd
+          ls -la
+
       - name: Make Gradle wrapper executable
-        run: chmod +x gradlew
+        run: chmod +x ./gradlew
+
+      - name: List Gradle tasks (debug)
+        run: ./gradlew tasks --no-daemon
 
       - name: Build and test
-        run: ./gradlew clean test
+        run: ./gradlew test --no-daemon
