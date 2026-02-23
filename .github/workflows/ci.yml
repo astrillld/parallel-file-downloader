@@ -28,5 +28,5 @@ jobs:
       - name: List Gradle tasks (debug)
         run: ./gradlew tasks --no-daemon
 
-      - name: Build and test
+      - name: Run tests
         run: ./gradlew test --no-daemon
