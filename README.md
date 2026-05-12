@@ -9,9 +9,9 @@ A multithreaded HTTP file downloader implemented in Java.
  5. If any chunk fails, all remaining downloads are cancelled immediately 
 
 ## What changed:
-**`FileChannel` instead of `RandomAccessFile` per chunk**
+1. `FileChannel` instead of `RandomAccessFile` per chunk.
    A single `FileChannel` is opened for the entire download. Each thread writes to its own non-overlapping byte range using `channel.write(buffer, position)`, which avoids the overhead of repeatedly opening and closing the file.
-**`ProgressListener` callback**
+2. `ProgressListener` callback.
    An optional `ProgressListener` can be passed to the constructor to track download progress.
 
 ## Usage
