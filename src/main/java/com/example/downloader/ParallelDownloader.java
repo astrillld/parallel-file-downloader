@@ -3,10 +3,12 @@ package com.example.downloader;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -27,55 +29,45 @@ public class ParallelDownloader {
     public void download(String url, Path outputFile) throws IOException, InterruptedException {
         HeadInfo info = head(url);
 
-        if (!info.acceptRangesBytes) {
+        if (!info.acceptRangesBytes()) {
             throw new IOException("Server does not support byte ranges (Accept-Ranges: bytes).");
         }
-        if (info.contentLength < 0) {
-            throw new IOException("Missing/invalid Content-Length.");
+        if (info.contentLength() < 0) {
+            throw new IOException("Missing or invalid Content-Length.");
         }
 
-        List<Chunk> chunks = splitIntoChunks(info.contentLength, chunkSizeBytes);
+        List<Chunk> chunks = splitIntoChunks(info.contentLength(), chunkSizeBytes);
 
         // Pre-allocate output file size
-        try (RandomAccessFile raf = new RandomAccessFile(outputFile.toFile(), "rw")) {
-            raf.setLength(info.contentLength);
-        }
+        try (FileChannel channel = FileChannel.open(outputFile, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+            channel.write(ByteBuffer.allocate(1), info.contentLength() - 1);
+            ExecutorService pool = Executors.newFixedThreadPool(threads);
+            List<Future<Void>> futures = new ArrayList<>(chunks.size());
 
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
-        List<Future<Void>> futures = new ArrayList<>();
-
-        for (Chunk c : chunks) {
-            futures.add(pool.submit(() -> {
-                byte[] data = downloadChunk(url, c.startInclusive, c.endInclusive);
-                writeAt(outputFile, c.startInclusive, data);
-                return null;
-            }));
-        }
-
-        pool.shutdown();
-
-        // fail fast if any chunk fails
-        for (Future<Void> f : futures) {
-            try {
-                f.get();
-            } catch (ExecutionException e) {
-                pool.shutdownNow();
-                Throwable cause = e.getCause() != null ? e.getCause() : e;
-                if (cause instanceof IOException io) throw io;
-                throw new IOException("Chunk download failed: " + cause.getMessage(), cause);
+            for (Chunk c : chunks) {
+                futures.add(pool.submit(() -> {
+                    byte[] data = downloadChunk(url, c.start(), c.end());
+                    writeAt(channel, c.start(), data);
+                    return null;
+                }));
             }
-        }
+            pool.shutdown();
+            for (Future<Void> f : futures) {
+                try {
+                    f.get();
+                } catch (ExecutionException e) {
+                    pool.shutdownNow();
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    if (cause instanceof IOException io) throw io;
+                    throw new IOException("Chunk download failed: " + cause.getMessage(), cause);
+                }
+            }
 
-        if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
-            pool.shutdownNow();
         }
     }
 
-    private static void writeAt(Path outputFile, long offset, byte[] data) throws IOException {
-        try (RandomAccessFile raf = new RandomAccessFile(outputFile.toFile(), "rw")) {
-            raf.seek(offset);
-            raf.write(data);
-        }
+    private static void writeAt(FileChannel channel, long offset, byte[] data) throws IOException {
+        channel.write(ByteBuffer.wrap(data), offset);
     }
 
     private static byte[] downloadChunk(String urlStr, long startInclusive, long endInclusive) throws IOException {
@@ -94,17 +86,18 @@ public class ParallelDownloader {
 
         try (InputStream in = new BufferedInputStream(conn.getInputStream())) {
             byte[] buf = in.readAllBytes();
-            // Some servers may return 200 OK with full content; we guard against that:
-            if (buf.length != expectedLen) {
-                // If full content came back, slice the needed part (rare, but safe)
-                if (buf.length > expectedLen) {
-                    byte[] slice = new byte[expectedLen];
-                    System.arraycopy(buf, 0, slice, 0, expectedLen);
-                    return slice;
-                }
-                throw new IOException("Chunk size mismatch.Expected " + expectedLen + " bytes, got " + buf.length);
+            if (buf.length == expectedLen) {
+                return buf;
             }
-            return buf;
+            // If the server replies 200 with full content, while Range was sent
+            if (buf.length > expectedLen) {
+                byte[] slice = new byte[(int) expectedLen];
+                System.arraycopy(buf, (int) startInclusive, slice, 0, (int) expectedLen);
+                return slice;
+            }
+
+            throw new IOException(
+                    "Chunk size mismatch. Expected " + expectedLen + " bytes, got " + buf.length);
         } finally {
             conn.disconnect();
         }
@@ -112,26 +105,28 @@ public class ParallelDownloader {
 
     private static HeadInfo head(String urlStr) throws IOException {
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
-        conn.setRequestMethod("HEAD");
-        conn.setInstanceFollowRedirects(true);
-        conn.connect();
+        try {
+            conn.setRequestMethod("HEAD");
+            conn.setInstanceFollowRedirects(true);
+            conn.connect();
 
-        String acceptRanges = conn.getHeaderField("Accept-Ranges");
-        String contentLength = conn.getHeaderField("Content-Length");
+            String acceptRanges = conn.getHeaderField("Accept-Ranges");
+            String contentLength = conn.getHeaderField("Content-Length");
 
-        boolean rangesBytes = acceptRanges != null && acceptRanges.toLowerCase(Locale.ROOT).contains("bytes");
+            boolean rangesBytes = acceptRanges != null && acceptRanges.toLowerCase(Locale.ROOT).contains("bytes");
 
-        long len = -1;
-        if (contentLength != null) {
-            try {
-                len = Long.parseLong(contentLength.trim());
-            } catch (NumberFormatException ignored) {
-                len = -1;
+            long len = -1;
+            if (contentLength != null) {
+                try {
+                    len = Long.parseLong(contentLength.trim());
+                } catch (NumberFormatException ignored) {
+                    len = -1;
+                }
             }
+            return new HeadInfo(rangesBytes, len);
+        } finally {
+            conn.disconnect();
         }
-
-        conn.disconnect();
-        return new HeadInfo(rangesBytes, len);
     }
 
     private static List<Chunk> splitIntoChunks(long totalBytes, int chunkSize) {
@@ -145,6 +140,6 @@ public class ParallelDownloader {
         return chunks;
     }
 
-    private record Chunk(long startInclusive, long endInclusive) {}
+    record Chunk(long start, long end) {}
     private record HeadInfo(boolean acceptRangesBytes, long contentLength) {}
 }
