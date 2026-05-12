@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -13,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -34,8 +36,7 @@ public class ParallelDownloaderTest {
 
         String url = "http://localhost:" + server.getAddress().getPort() + "/file.bin";
 
-        Path out = Files.createTempFile("downloaded-", ".bin");
-        out.toFile().deleteOnExit();
+        Path out = tempDir.resolve("large.bin");
 
         ParallelDownloader downloader = new ParallelDownloader(4, 256_000);
         downloader.download(url, out);
@@ -51,11 +52,74 @@ public class ParallelDownloaderTest {
     void downloadsSingleChunkFile() throws Exception {
         byte[] content = generateData(100);
         startServer(content, true);
-
         Path out = tempDir.resolve("small.bin");
         new ParallelDownloader(4, 256_000).download(serverUrl(), out);
-
         assertContentEquals(content, out);
+    }
+
+    @Test
+    void downloadsFileExactlyOneChunk() throws Exception {
+        int chunkSize = 1024;
+        byte[] content = generateData(chunkSize);
+        startServer(content, true);
+        Path out = tempDir.resolve("exact.bin");
+        new ParallelDownloader(1, chunkSize).download(serverUrl(), out);
+        assertContentEquals(content, out);
+    }
+
+    @Test
+    void downloadsSingleByteFile() throws Exception {
+        byte[] content = new byte[]{42};
+        startServer(content, true);
+        Path out = tempDir.resolve("one.bin");
+        new ParallelDownloader(4, 256_000).download(serverUrl(), out);
+        assertContentEquals(content, out);
+    }
+
+    @Test
+    void worksWithSingleThread() throws Exception {
+        byte[] content = generateData(500_000);
+        startServer(content, true);
+        Path out = tempDir.resolve("singlethread.bin");
+        new ParallelDownloader(1, 100_000).download(serverUrl(), out);
+        assertContentEquals(content, out);
+    }
+
+    @Test
+    void splitIntoChunksCoversWholeFile() {
+        List<ParallelDownloader.Chunk> chunks = ParallelDownloader.splitIntoChunks(1000, 300);
+        for (int i = 1; i < chunks.size(); i++) {
+            assertEquals(chunks.get(i - 1).end() + 1, chunks.get(i).start(), "Gap between chunk " + (i - 1) + " and " + i);
+        }
+        assertEquals(0, chunks.getFirst().start());
+        assertEquals(999, chunks.getLast().end());
+    }
+
+    @Test
+    void splitIntoChunksSingleChunk() {
+        List<ParallelDownloader.Chunk> chunks = ParallelDownloader.splitIntoChunks(100, 500);
+        assertEquals(1, chunks.size());
+        assertEquals(0, chunks.get(0).start());
+        assertEquals(99, chunks.get(0).end());
+    }
+
+    @Test
+    void throwsWhenServerDoesNotSupportRanges() throws Exception {
+        byte[] content = generateData(1000);
+        startServer(content, false);
+        Path out = tempDir.resolve("noranges.bin");
+        IOException ex = assertThrows(IOException.class, () -> new ParallelDownloader(4, 256_000).download(serverUrl(), out));
+        assertTrue(ex.getMessage().contains("Accept-Ranges"), "Error message should mention Accept-Ranges");
+    }
+
+    @Test
+    void throwsWhenConstructedWithZeroThreads() {
+        assertThrows(IllegalArgumentException.class, () -> new ParallelDownloader(0, 1024));
+    }
+
+    @Test
+    void throwsWhenConstructedWithNegativeChunkSize() {
+        assertThrows(IllegalArgumentException.class, () -> new ParallelDownloader(4, -1));
     }
 
     private void startRangeServer(byte[] content) throws IOException {
@@ -67,7 +131,9 @@ public class ParallelDownloaderTest {
     private static void handle(HttpExchange exchange, byte[] content) throws IOException {
         String method = exchange.getRequestMethod();
         Headers resp = exchange.getResponseHeaders();
-        resp.add("Accept-Ranges", "bytes");
+        if (advertiseRanges) {
+            resp.add("Accept-Ranges", "bytes");
+        }
         resp.add("Content-Length", String.valueOf(content.length));
 
         if ("HEAD".equalsIgnoreCase(method)) {
@@ -130,5 +196,22 @@ public class ParallelDownloaderTest {
     private static byte[] hash(byte[] data) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         return md.digest(data);
+    }
+
+    private void startServer(byte[] content, boolean advertiseRanges) throws IOException {
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/file", exchange -> handle(exchange, content, advertiseRanges));
+        server.start();
+    }
+
+    private String serverUrl() {
+        return "http://localhost:" + server.getAddress().getPort() + "/file";
+    }
+
+    private static void assertContentEquals(byte[] expected, Path actual) throws Exception {
+        byte[] downloaded = Files.readAllBytes(actual);
+        assertEquals(expected.length, downloaded.length, "File size mismatch");
+        assertArrayEquals(hash(expected), hash(downloaded), "SHA-256 hash mismatch");
+        assertArrayEquals(expected, downloaded, "Byte content mismatch");
     }
 }
