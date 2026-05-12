@@ -131,9 +131,7 @@ public class ParallelDownloaderTest {
     private static void handle(HttpExchange exchange, byte[] content) throws IOException {
         String method = exchange.getRequestMethod();
         Headers resp = exchange.getResponseHeaders();
-        if (advertiseRanges) {
-            resp.add("Accept-Ranges", "bytes");
-        }
+        resp.add("Accept-Ranges", "bytes");
         resp.add("Content-Length", String.valueOf(content.length));
 
         if ("HEAD".equalsIgnoreCase(method)) {
