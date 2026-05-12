@@ -82,7 +82,7 @@ public class ParallelDownloader {
             throw new IOException("Unexpected response code for range GET: " + code);
         }
 
-        int expectedLen = (int) (endInclusive - startInclusive + 1);
+        long expectedLen = endInclusive - startInclusive + 1;
 
         try (InputStream in = new BufferedInputStream(conn.getInputStream())) {
             byte[] buf = in.readAllBytes();
