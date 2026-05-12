@@ -13,18 +13,26 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class ParallelDownloader {
 
     private final int threads;
     private final int chunkSizeBytes;
+    private final ProgressListener progressListener;
 
     public ParallelDownloader(int threads, int chunkSizeBytes) {
+        this(threads, chunkSizeBytes, null);
+    }
+
+    public ParallelDownloader(int threads, int chunkSizeBytes, ProgressListener progressListener) {
         if (threads <= 0) throw new IllegalArgumentException("threads must be > 0");
         if (chunkSizeBytes <= 0) throw new IllegalArgumentException("chunkSizeBytes must be > 0");
         this.threads = threads;
         this.chunkSizeBytes = chunkSizeBytes;
+        this.progressListener = progressListener;
     }
+
 
     public void download(String url, Path outputFile) throws IOException, InterruptedException {
         HeadInfo info = head(url);
@@ -43,11 +51,16 @@ public class ParallelDownloader {
             channel.write(ByteBuffer.allocate(1), info.contentLength() - 1);
             ExecutorService pool = Executors.newFixedThreadPool(threads);
             List<Future<Void>> futures = new ArrayList<>(chunks.size());
+            AtomicLong downloaded = new AtomicLong(0);
+            long total = info.contentLength();
 
             for (Chunk c : chunks) {
                 futures.add(pool.submit(() -> {
                     byte[] data = downloadChunk(url, c.start(), c.end());
                     writeAt(channel, c.start(), data);
+                    if (progressListener != null) {
+                        progressListener.onProgress(downloaded.addAndGet(data.length), total);
+                    }
                     return null;
                 }));
             }

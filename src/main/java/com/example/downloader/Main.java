@@ -16,9 +16,9 @@ public class Main {
         int threads = args.length >= 3 ? Integer.parseInt(args[2]) : 4;
         int chunkSize = args.length >= 4 ? Integer.parseInt(args[3]) : 1_048_576; // 1 MiB
 
-        ParallelDownloader downloader = new ParallelDownloader(threads, chunkSize);
+        ParallelDownloader downloader = new ParallelDownloader(threads, chunkSize, (done, total) -> System.out.printf("\rProgress: %.1f%%", 100.0 * done / total));
         downloader.download(url, output);
-
+        System.out.println();
         System.out.println("Downloaded to: " + output.toAbsolutePath());
     }
 }
