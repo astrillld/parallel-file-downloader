@@ -20,6 +20,8 @@ public class ParallelDownloaderTest {
 
     private HttpServer server;
 
+    @TempDir Path tempDir;
+
     @AfterEach
     void tearDown() {
         if (server != null) server.stop(0);
@@ -43,6 +45,17 @@ public class ParallelDownloaderTest {
         assertArrayEquals(hash(content), hash(downloaded), "Downloaded file hash must match source");
         assertEquals(content.length, downloaded.length, "Downloaded length must match");
         assertTrue(Arrays.equals(content, downloaded), "Downloaded bytes must match exactly");
+    }
+
+    @Test
+    void downloadsSingleChunkFile() throws Exception {
+        byte[] content = generateData(100);
+        startServer(content, true);
+
+        Path out = tempDir.resolve("small.bin");
+        new ParallelDownloader(4, 256_000).download(serverUrl(), out);
+
+        assertContentEquals(content, out);
     }
 
     private void startRangeServer(byte[] content) throws IOException {
